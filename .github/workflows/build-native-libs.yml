@@ -1,0 +1,154 @@
+name: Build Native Libraries (libFLAC + FFmpeg)
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build-native-libs.yml'
+env:
+  NDK_VERSION: r26d
+  FLAC_VERSION: 1.4.3
+  FFMPEG_VERSION: n6.1
+jobs:
+  build-libflac:
+    name: Build libFLAC (${{ matrix.abi }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, armeabi-v7a]
+        include:
+          - abi: arm64-v8a
+            cmake_abi: arm64-v8a
+          - abi: armeabi-v7a
+            cmake_abi: armeabi-v7a
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+      - run: |
+          wget -q https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip
+          unzip -q android-ndk-${{ env.NDK_VERSION }}-linux.zip
+          echo "NDK_ROOT=$PWD/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_ENV
+      - run: git clone --branch ${{ env.FLAC_VERSION }} --depth 1 https://github.com/xiph/flac.git flac-src
+      - run: |
+          mkdir -p flac-build flac-install
+          cmake -S flac-src -B flac-build \
+            -DCMAKE_TOOLCHAIN_FILE=$NDK_ROOT/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=${{ matrix.cmake_abi }} \
+            -DANDROID_PLATFORM=android-21 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_CXXLIBS=OFF \
+            -DBUILD_EXAMPLES=OFF \
+            -DBUILD_TESTING=OFF \
+            -DWITH_OGG=OFF \
+            -DINSTALL_MANPAGES=OFF \
+            -DCMAKE_INSTALL_PREFIX=$PWD/flac-install
+          cmake --build flac-build -j$(nproc)
+          cmake --build flac-build --target install -j$(nproc)
+      - run: |
+          mkdir -p output/libflac/lib/${{ matrix.abi }}
+          mkdir -p output/libflac/include
+          cp flac-install/lib/libFLAC.a output/libflac/lib/${{ matrix.abi }}/
+          cp -r flac-install/include/FLAC output/libflac/include/FLAC
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libflac-${{ matrix.abi }}
+          path: output/libflac/
+
+  build-ffmpeg:
+    name: Build FFmpeg (${{ matrix.abi }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, armeabi-v7a]
+        include:
+          - abi: arm64-v8a
+            arch: aarch64
+            cpu: armv8-a
+            clang_prefix: aarch64-linux-android21
+          - abi: armeabi-v7a
+            arch: arm
+            cpu: armv7-a
+            clang_prefix: armv7a-linux-androideabi21
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm yasm
+      - run: |
+          wget -q https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip
+          unzip -q android-ndk-${{ env.NDK_VERSION }}-linux.zip
+          echo "NDK_ROOT=$PWD/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_ENV
+          echo "TOOLCHAIN=$PWD/android-ndk-${{ env.NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64" >> $GITHUB_ENV
+      - run: git clone --branch ${{ env.FFMPEG_VERSION }} --depth 1 https://github.com/FFmpeg/FFmpeg.git ffmpeg-src
+      - run: |
+          cd ffmpeg-src
+          export CC=$TOOLCHAIN/bin/${{ matrix.clang_prefix }}-clang
+          export CXX=$TOOLCHAIN/bin/${{ matrix.clang_prefix }}-clang++
+          export AR=$TOOLCHAIN/bin/llvm-ar
+          export STRIP=$TOOLCHAIN/bin/llvm-strip
+          export NM=$TOOLCHAIN/bin/llvm-nm
+          export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
+          export SYSROOT=$TOOLCHAIN/sysroot
+          ./configure \
+            --prefix=$PWD/../ffmpeg-install \
+            --target-os=android \
+            --arch=${{ matrix.arch }} \
+            --cpu=${{ matrix.cpu }} \
+            --sysroot=$SYSROOT \
+            --cc=$CC --cxx=$CXX --ar=$AR --strip=$STRIP --nm=$NM --ranlib=$RANLIB \
+            --extra-cflags="-O3 -fPIC" \
+            --enable-cross-compile \
+            --disable-debug --disable-stripping \
+            --disable-doc --disable-htmlpages --disable-manpages --disable-podpages --disable-txtpages \
+            --disable-ffplay --disable-ffprobe --disable-ffmpeg \
+            --disable-shared --enable-static \
+            --disable-network --disable-hwaccels --disable-filters \
+            --disable-encoders --disable-muxers \
+            --disable-devices --disable-postproc --disable-avfilter \
+            --disable-swresample --disable-swscale --disable-bsfs \
+            --disable-indevs --disable-outdevs \
+            --disable-parsers --enable-parser=aac,mpegaudio,flac \
+            --disable-decoders --enable-decoder=aac,alac,mp3,flac,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_s16be \
+            --disable-demuxers --enable-demuxer=mp3,mov,wav,ogg,flac \
+            --disable-protocols --enable-protocol=file \
+            --enable-small
+          make -j$(nproc)
+          make install
+      - run: |
+          mkdir -p output/ffmpeg/lib/${{ matrix.abi }}
+          mkdir -p output/ffmpeg/include
+          cp ffmpeg-install/lib/libavcodec.a ffmpeg-install/lib/libavformat.a ffmpeg-install/lib/libavutil.a output/ffmpeg/lib/${{ matrix.abi }}/
+          cp -r ffmpeg-install/include/libavcodec ffmpeg-install/include/libavformat ffmpeg-install/include/libavutil output/ffmpeg/include/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-${{ matrix.abi }}
+          path: output/ffmpeg/
+
+  merge:
+    name: Merge artifacts
+    needs: [build-libflac, build-ffmpeg]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          merge-multiple: false
+      - run: |
+          set -e
+          mkdir -p native-libs/libflac/lib/arm64-v8a native-libs/libflac/lib/armeabi-v7a
+          mkdir -p native-libs/ffmpeg/lib/arm64-v8a native-libs/ffmpeg/lib/armeabi-v7a
+          cp -r artifacts/libflac-arm64-v8a/include/FLAC native-libs/libflac/include/
+          cp artifacts/libflac-arm64-v8a/lib/arm64-v8a/libFLAC.a native-libs/libflac/lib/arm64-v8a/
+          cp artifacts/libflac-armeabi-v7a/lib/armeabi-v7a/libFLAC.a native-libs/libflac/lib/armeabi-v7a/
+          cp -r artifacts/ffmpeg-arm64-v8a/include/libavcodec artifacts/ffmpeg-arm64-v8a/include/libavformat artifacts/ffmpeg-arm64-v8a/include/libavutil native-libs/ffmpeg/include/
+          cp artifacts/ffmpeg-arm64-v8a/lib/arm64-v8a/*.a native-libs/ffmpeg/lib/arm64-v8a/
+          cp artifacts/ffmpeg-armeabi-v7a/lib/armeabi-v7a/*.a native-libs/ffmpeg/lib/armeabi-v7a/
+          tar czf native-libs.tar.gz native-libs/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-libs-complete
+          path: native-libs.tar.gz
