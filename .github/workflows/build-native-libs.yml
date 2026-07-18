@@ -141,8 +141,10 @@ jobs:
       - run: |
           set -e
           mkdir -p native-libs/libflac/lib/arm64-v8a native-libs/libflac/lib/armeabi-v7a
+          mkdir -p native-libs/libflac/include
           mkdir -p native-libs/ffmpeg/lib/arm64-v8a native-libs/ffmpeg/lib/armeabi-v7a
-          cp -r artifacts/libflac-arm64-v8a/include/FLAC native-libs/libflac/include/
+          mkdir -p native-libs/ffmpeg/include
+          cp -r artifacts/libflac-arm64-v8a/include/FLAC native-libs/libflac/include/FLAC
           cp artifacts/libflac-arm64-v8a/lib/arm64-v8a/libFLAC.a native-libs/libflac/lib/arm64-v8a/
           cp artifacts/libflac-armeabi-v7a/lib/armeabi-v7a/libFLAC.a native-libs/libflac/lib/armeabi-v7a/
           cp -r artifacts/ffmpeg-arm64-v8a/include/libavcodec artifacts/ffmpeg-arm64-v8a/include/libavformat artifacts/ffmpeg-arm64-v8a/include/libavutil native-libs/ffmpeg/include/
