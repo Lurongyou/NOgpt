@@ -1,0 +1,113 @@
+name: Build libFLAC + FFmpeg for Android
+
+# 手动触发：在 GitHub 仓库页面 Actions 标签页里点 "Run workflow"
+on:
+  workflow_dispatch:
+
+env:
+  NDK_VERSION: r26d
+  API_LEVEL: 24   # 对应工程 minSdk = 24
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        abi: [arm64-v8a, armeabi-v7a]
+    steps:
+      - name: 安装编译依赖
+        run: sudo apt-get update && sudo apt-get install -y autoconf automake libtool pkg-config nasm
+
+      - name: 下载 Android NDK
+        run: |
+          wget -q https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip
+          unzip -q android-ndk-${NDK_VERSION}-linux.zip
+          echo "NDK=$PWD/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
+
+      - name: 设置本次 ABI 对应的交叉编译变量
+        run: |
+          TOOLCHAIN=${{ env.NDK }}/toolchains/llvm/prebuilt/linux-x86_64
+          echo "TOOLCHAIN=$TOOLCHAIN" >> $GITHUB_ENV
+          if [ "${{ matrix.abi }}" = "arm64-v8a" ]; then
+            echo "CC=$TOOLCHAIN/bin/aarch64-linux-android${{ env.API_LEVEL }}-clang" >> $GITHUB_ENV
+            echo "CXX=$TOOLCHAIN/bin/aarch64-linux-android${{ env.API_LEVEL }}-clang++" >> $GITHUB_ENV
+            echo "FFMPEG_ARCH=aarch64" >> $GITHUB_ENV
+          else
+            echo "CC=$TOOLCHAIN/bin/armv7a-linux-androideabi${{ env.API_LEVEL }}-clang" >> $GITHUB_ENV
+            echo "CXX=$TOOLCHAIN/bin/armv7a-linux-androideabi${{ env.API_LEVEL }}-clang++" >> $GITHUB_ENV
+            echo "FFMPEG_ARCH=arm" >> $GITHUB_ENV
+          fi
+          echo "AR=$TOOLCHAIN/bin/llvm-ar" >> $GITHUB_ENV
+          echo "STRIP=$TOOLCHAIN/bin/llvm-strip" >> $GITHUB_ENV
+          echo "RANLIB=$TOOLCHAIN/bin/llvm-ranlib" >> $GITHUB_ENV
+
+      # ------------------------------------------------------------------
+      # libFLAC —— 红线7：关闭 Ogg 支持，只编 stream_decoder，不编 encoder
+      # ------------------------------------------------------------------
+      - name: 拉取 libFLAC 1.5.0 源码
+        run: git clone --branch 1.5.0 --depth 1 https://github.com/xiph/flac.git flac-src
+
+      - name: CMake 交叉编译 libFLAC
+        run: |
+          cmake -S flac-src -B flac-build \
+            -DCMAKE_TOOLCHAIN_FILE=${{ env.NDK }}/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=${{ matrix.abi }} \
+            -DANDROID_PLATFORM=android-${{ env.API_LEVEL }} \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_CXXLIBS=OFF \
+            -DBUILD_PROGRAMS=OFF \
+            -DBUILD_EXAMPLES=OFF \
+            -DBUILD_TESTING=OFF \
+            -DBUILD_DOCS=OFF \
+            -DINSTALL_MANPAGES=OFF \
+            -DWITH_OGG=OFF
+          cmake --build flac-build --target FLAC -j$(nproc)
+          mkdir -p out/libflac/lib/${{ matrix.abi }} out/libflac/include/FLAC
+          find flac-build -name "libFLAC.a" -exec cp {} out/libflac/lib/${{ matrix.abi }}/ \;
+          cp flac-src/include/FLAC/*.h out/libflac/include/FLAC/
+
+      # ------------------------------------------------------------------
+      # FFmpeg —— 红线8：只开指定解码器/demuxer，关闭 network/hwaccel/filter/encoder
+      # ------------------------------------------------------------------
+      - name: 拉取 FFmpeg n6.1 源码
+        run: git clone --branch n6.1 --depth 1 https://github.com/FFmpeg/FFmpeg.git ffmpeg-src
+
+      - name: configure + make 交叉编译 FFmpeg
+        working-directory: ffmpeg-src
+        run: |
+          ./configure \
+            --target-os=android \
+            --arch=${{ env.FFMPEG_ARCH }} \
+            --cpu=generic \
+            --cc=${{ env.CC }} \
+            --cxx=${{ env.CXX }} \
+            --ar=${{ env.AR }} \
+            --ranlib=${{ env.RANLIB }} \
+            --strip=${{ env.STRIP }} \
+            --sysroot=${{ env.TOOLCHAIN }}/sysroot \
+            --enable-cross-compile \
+            --disable-everything \
+            --disable-network --disable-hwaccels --disable-filters \
+            --disable-encoders --disable-muxers --disable-programs --disable-doc \
+            --disable-avdevice --disable-postproc --disable-avfilter \
+            --enable-decoder=aac,alac,mp3,flac,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_s16be \
+            --enable-demuxer=mp3,mov,wav,ogg,flac \
+            --enable-protocol=file \
+            --enable-static --disable-shared \
+            --prefix=$PWD/../out-ffmpeg
+          make -j$(nproc)
+          make install
+
+      - name: 收集 FFmpeg 产物
+        run: |
+          mkdir -p out/ffmpeg/lib/${{ matrix.abi }} out/ffmpeg/include
+          cp out-ffmpeg/lib/libavcodec.a out-ffmpeg/lib/libavformat.a out-ffmpeg/lib/libavutil.a out/ffmpeg/lib/${{ matrix.abi }}/
+          cp -r out-ffmpeg/include/* out/ffmpeg/include/
+
+      - name: 打包上传本次 ABI 的产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-libs-${{ matrix.abi }}
+          path: out/
+          retention-days: 14
