@@ -48,6 +48,8 @@ jobs:
             -DCMAKE_INSTALL_PREFIX=$PWD/flac-install
           cmake --build flac-build -j$(nproc)
           cmake --build flac-build --target install -j$(nproc)
+      # 修复点：include/ 和 lib/<abi>/ 两层目录必须先 mkdir 出来，
+      # 且明确 cp 到"目录里"而不是让 cp 自己决定要不要新建/改名目标目录。
       - run: |
           mkdir -p output/libflac/lib/${{ matrix.abi }}
           mkdir -p output/libflac/include
@@ -103,6 +105,7 @@ jobs:
             --cc=$CC --cxx=$CXX --ar=$AR --strip=$STRIP --nm=$NM --ranlib=$RANLIB \
             --extra-cflags="-O3 -fPIC" \
             --enable-pic \
+            --disable-asm \
             --disable-zlib \
             --enable-cross-compile \
             --disable-debug --disable-stripping \
@@ -121,6 +124,7 @@ jobs:
             --enable-small
           make -j$(nproc)
           make install
+      # 修复点：output/ffmpeg/include/ 必须先 mkdir，否则多源 cp 直接报错退出
       - run: |
           mkdir -p output/ffmpeg/lib/${{ matrix.abi }}
           mkdir -p output/ffmpeg/include
@@ -140,6 +144,11 @@ jobs:
         with:
           path: artifacts/
           merge-multiple: false
+      # 修复点：artifacts/<name>/ 下面直接就是 lib/<abi>、include 这些，
+      # 没有多余的 "libflac/" "ffmpeg/" 这层前缀（那层是上传时的根目录，
+      # 不会出现在下载下来的路径里）。之前的路径全部对不上，且被
+      # || true 悄悄吞掉了错误，产物是空的。这里去掉多余前缀，并且去掉
+      # || true，改成真的失败就报错，别再悄悄生成一个空包。
       - run: |
           set -e
           mkdir -p native-libs/libflac/lib/arm64-v8a native-libs/libflac/lib/armeabi-v7a
