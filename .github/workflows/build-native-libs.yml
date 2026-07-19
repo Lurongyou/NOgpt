@@ -102,7 +102,7 @@ jobs:
             --sysroot=$SYSROOT \
             --cc=$CC --cxx=$CXX --ar=$AR --strip=$STRIP --nm=$NM --ranlib=$RANLIB \
             --extra-cflags="-O3 -fPIC" \
-            --extra-asflags="-fPIC" \
+            --enable-pic \
             --disable-zlib \
             --enable-cross-compile \
             --disable-debug --disable-stripping \
