@@ -1,28 +1,27 @@
-name: Build Native Libraries (libFLAC + FFmpeg)
+name: Build Native Libraries (libFLAC + FFmpeg static libs)
 on:
   workflow_dispatch:
   push:
     paths:
       - '.github/workflows/build-native-libs.yml'
 env:
-  NDK_VERSION: r26d
-  FLAC_VERSION: 1.5.0
-  FFMPEG_VERSION: n8.1.2
+  NDK_VERSION: r27d
+  FLAC_TAG: '1.5.0'          # 最新稳定版；链接预编译.a不用再绑定旧版本号
+  FFMPEG_TAG: n9.0           # https://github.com/FFmpeg/FFmpeg/tags 目前最新
+
 jobs:
+  # ------------------------------------------------------------------
+  # 编译 libFLAC.a —— 用 xiph/flac 官方自带的 CMake 构建系统。
+  # 只关掉不需要的部分(共享库/C++绑定/示例程序/测试/ogg支持)。
+  # ------------------------------------------------------------------
   build-libflac:
     name: Build libFLAC (${{ matrix.abi }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        abi: [arm64-v8a, armeabi-v7a]
-        include:
-          - abi: arm64-v8a
-            cmake_abi: arm64-v8a
-          - abi: armeabi-v7a
-            cmake_abi: armeabi-v7a
+        abi: [arm64-v8a, armeabi-v7a, x86_64]
     steps:
-      - uses: actions/checkout@v4
       - run: |
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build
@@ -30,52 +29,60 @@ jobs:
           wget -q https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip
           unzip -q android-ndk-${{ env.NDK_VERSION }}-linux.zip
           echo "NDK_ROOT=$PWD/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_ENV
-      - run: git clone --branch ${{ env.FLAC_VERSION }} --depth 1 https://github.com/xiph/flac.git flac-src
+      - run: git clone --branch ${{ env.FLAC_TAG }} --depth 1 https://github.com/xiph/flac.git flac-src
       - run: |
           mkdir -p flac-build flac-install
-          cmake -S flac-src -B flac-build \
+          cmake -S flac-src -B flac-build -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE=$NDK_ROOT/build/cmake/android.toolchain.cmake \
-            -DANDROID_ABI=${{ matrix.cmake_abi }} \
+            -DANDROID_ABI=${{ matrix.abi }} \
             -DANDROID_PLATFORM=android-24 \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
             -DBUILD_CXXLIBS=OFF \
+            -DBUILD_PROGRAMS=OFF \
             -DBUILD_EXAMPLES=OFF \
             -DBUILD_TESTING=OFF \
+            -DBUILD_DOCS=OFF \
             -DWITH_OGG=OFF \
             -DINSTALL_MANPAGES=OFF \
-            -DHAVE_FSEEKO=1 \
             -DCMAKE_INSTALL_PREFIX=$PWD/flac-install
           cmake --build flac-build -j$(nproc)
-          cmake --build flac-build --target install -j$(nproc)
-      # 修复点：include/ 和 lib/<abi>/ 两层目录必须先 mkdir 出来，
-      # 且明确 cp 到"目录里"而不是让 cp 自己决定要不要新建/改名目标目录。
+          cmake --build flac-build --target install
       - run: |
-          mkdir -p output/libflac/lib/${{ matrix.abi }}
-          mkdir -p output/libflac/include
-          cp flac-install/lib/libFLAC.a output/libflac/lib/${{ matrix.abi }}/
-          cp -r flac-install/include/FLAC output/libflac/include/FLAC
+          mkdir -p output/flac/lib output/flac/include
+          # 不同发行版/CMake配置下产物名字可能是 libFLAC.a 也可能是 libFLAC-static.a，两个都找一下
+          find flac-install -name "libFLAC*.a" -exec cp {} output/flac/lib/libFLAC.a \;
+          cp -r flac-install/include/FLAC output/flac/include/FLAC
       - uses: actions/upload-artifact@v4
         with:
           name: libflac-${{ matrix.abi }}
-          path: output/libflac/
+          path: output/flac/
 
+  # ------------------------------------------------------------------
+  # 编译 FFmpeg，只要解码相关的三个库 + swresample(重采样格式转换，
+  # flac_decode_jni.cpp 靠这个把 AAC/MP3/PCM 解出来的样本转成 FLAC
+  # encoder 需要的 planar S16/S32 格式，千万不能禁掉)。
+  # ------------------------------------------------------------------
   build-ffmpeg:
     name: Build FFmpeg (${{ matrix.abi }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        abi: [arm64-v8a, armeabi-v7a]
+        abi: [arm64-v8a, armeabi-v7a, x86_64]
         include:
           - abi: arm64-v8a
             arch: aarch64
             cpu: armv8-a
-            clang_prefix: aarch64-linux-android21
+            clang_prefix: aarch64-linux-android24
           - abi: armeabi-v7a
             arch: arm
             cpu: armv7-a
-            clang_prefix: armv7a-linux-androideabi21
+            clang_prefix: armv7a-linux-androideabi24
+          - abi: x86_64
+            arch: x86_64
+            cpu: x86-64
+            clang_prefix: x86_64-linux-android24
     steps:
       - uses: actions/checkout@v4
       - run: |
@@ -86,7 +93,7 @@ jobs:
           unzip -q android-ndk-${{ env.NDK_VERSION }}-linux.zip
           echo "NDK_ROOT=$PWD/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_ENV
           echo "TOOLCHAIN=$PWD/android-ndk-${{ env.NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64" >> $GITHUB_ENV
-      - run: git clone --branch ${{ env.FFMPEG_VERSION }} --depth 1 https://github.com/FFmpeg/FFmpeg.git ffmpeg-src
+      - run: git clone --branch ${{ env.FFMPEG_TAG }} --depth 1 https://github.com/FFmpeg/FFmpeg.git ffmpeg-src
       - run: |
           cd ffmpeg-src
           export CC=$TOOLCHAIN/bin/${{ matrix.clang_prefix }}-clang
@@ -104,9 +111,6 @@ jobs:
             --sysroot=$SYSROOT \
             --cc=$CC --cxx=$CXX --ar=$AR --strip=$STRIP --nm=$NM --ranlib=$RANLIB \
             --extra-cflags="-O3 -fPIC" \
-            --enable-pic \
-            --disable-asm \
-            --disable-zlib \
             --enable-cross-compile \
             --disable-debug --disable-stripping \
             --disable-doc --disable-htmlpages --disable-manpages --disable-podpages --disable-txtpages \
@@ -114,27 +118,39 @@ jobs:
             --disable-shared --enable-static \
             --disable-network --disable-hwaccels --disable-filters \
             --disable-encoders --disable-muxers \
-            --disable-devices --disable-avfilter \
-            --disable-swresample --disable-swscale --disable-bsfs \
+            --disable-devices --disable-avdevice --disable-avfilter \
+            --disable-swscale --disable-postproc --disable-bsfs \
             --disable-indevs --disable-outdevs \
-            --disable-parsers --enable-parser=aac,mpegaudio,flac \
-            --disable-decoders --enable-decoder=aac,alac,mp3,flac,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_s16be \
-            --disable-demuxers --enable-demuxer=mp3,mov,wav,ogg,flac \
+            --enable-swresample \
+            --disable-parsers --enable-parser=aac,mpegaudio \
+            --disable-decoders --enable-decoder=aac,alac,mp3,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_s16be \
+            --disable-demuxers --enable-demuxer=mov,mp3,wav \
             --disable-protocols --enable-protocol=file \
             --enable-small
           make -j$(nproc)
           make install
-      # 修复点：output/ffmpeg/include/ 必须先 mkdir，否则多源 cp 直接报错退出
       - run: |
           mkdir -p output/ffmpeg/lib/${{ matrix.abi }}
           mkdir -p output/ffmpeg/include
-          cp ffmpeg-install/lib/libavcodec.a ffmpeg-install/lib/libavformat.a ffmpeg-install/lib/libavutil.a output/ffmpeg/lib/${{ matrix.abi }}/
-          cp -r ffmpeg-install/include/libavcodec ffmpeg-install/include/libavformat ffmpeg-install/include/libavutil output/ffmpeg/include/
+          cp ffmpeg-install/lib/libavcodec.a \
+             ffmpeg-install/lib/libavformat.a \
+             ffmpeg-install/lib/libavutil.a \
+             ffmpeg-install/lib/libswresample.a \
+             output/ffmpeg/lib/${{ matrix.abi }}/
+          cp -r ffmpeg-install/include/libavcodec \
+                ffmpeg-install/include/libavformat \
+                ffmpeg-install/include/libavutil \
+                ffmpeg-install/include/libswresample \
+                output/ffmpeg/include/
       - uses: actions/upload-artifact@v4
         with:
           name: ffmpeg-${{ matrix.abi }}
           path: output/ffmpeg/
 
+  # ------------------------------------------------------------------
+  # 合并成一份 tar.gz，目录结构直接对应 CMakeLists.txt 里写的路径约定，
+  # 解压出来往 app/src/main/cpp/ 底下一放就能用，不用手动挪文件。
+  # ------------------------------------------------------------------
   merge:
     name: Merge artifacts
     needs: [build-libflac, build-ffmpeg]
@@ -144,25 +160,25 @@ jobs:
         with:
           path: artifacts/
           merge-multiple: false
-      # 修复点：artifacts/<name>/ 下面直接就是 lib/<abi>、include 这些，
-      # 没有多余的 "libflac/" "ffmpeg/" 这层前缀（那层是上传时的根目录，
-      # 不会出现在下载下来的路径里）。之前的路径全部对不上，且被
-      # || true 悄悄吞掉了错误，产物是空的。这里去掉多余前缀，并且去掉
-      # || true，改成真的失败就报错，别再悄悄生成一个空包。
       - run: |
           set -e
-          mkdir -p native-libs/libflac/lib/arm64-v8a native-libs/libflac/lib/armeabi-v7a
-          mkdir -p native-libs/libflac/include
-          mkdir -p native-libs/ffmpeg/lib/arm64-v8a native-libs/ffmpeg/lib/armeabi-v7a
+          mkdir -p native-libs
+
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            mkdir -p native-libs/flac/$abi
+            cp -r artifacts/libflac-$abi/* native-libs/flac/$abi/
+          done
+
           mkdir -p native-libs/ffmpeg/include
-          cp -r artifacts/libflac-arm64-v8a/include/FLAC native-libs/libflac/include/FLAC
-          cp artifacts/libflac-arm64-v8a/lib/arm64-v8a/libFLAC.a native-libs/libflac/lib/arm64-v8a/
-          cp artifacts/libflac-armeabi-v7a/lib/armeabi-v7a/libFLAC.a native-libs/libflac/lib/armeabi-v7a/
-          cp -r artifacts/ffmpeg-arm64-v8a/include/libavcodec artifacts/ffmpeg-arm64-v8a/include/libavformat artifacts/ffmpeg-arm64-v8a/include/libavutil native-libs/ffmpeg/include/
-          cp artifacts/ffmpeg-arm64-v8a/lib/arm64-v8a/*.a native-libs/ffmpeg/lib/arm64-v8a/
-          cp artifacts/ffmpeg-armeabi-v7a/lib/armeabi-v7a/*.a native-libs/ffmpeg/lib/armeabi-v7a/
+          cp -r artifacts/ffmpeg-arm64-v8a/include/* native-libs/ffmpeg/include/
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            mkdir -p native-libs/ffmpeg/lib/$abi
+            cp artifacts/ffmpeg-$abi/lib/$abi/*.a native-libs/ffmpeg/lib/$abi/
+          done
+
           tar czf native-libs.tar.gz native-libs/
       - uses: actions/upload-artifact@v4
         with:
           name: native-libs-complete
           path: native-libs.tar.gz
+
