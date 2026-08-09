@@ -45,6 +45,7 @@ jobs:
             -DBUILD_DOCS=OFF \
             -DWITH_OGG=OFF \
             -DINSTALL_MANPAGES=OFF \
+            -DCMAKE_C_FLAGS="-DHAVE_FSEEKO=1 -DHAVE_FTELLO=1" \
             -DCMAKE_INSTALL_PREFIX=$PWD/flac-install
           cmake --build flac-build -j$(nproc)
           cmake --build flac-build --target install
@@ -119,7 +120,7 @@ jobs:
             --disable-network --disable-hwaccels --disable-filters \
             --disable-encoders --disable-muxers \
             --disable-devices --disable-avdevice --disable-avfilter \
-            --disable-swscale --disable-postproc --disable-bsfs \
+            --disable-swscale --disable-bsfs \
             --disable-indevs --disable-outdevs \
             --enable-swresample \
             --disable-parsers --enable-parser=aac,mpegaudio \
@@ -181,4 +182,3 @@ jobs:
         with:
           name: native-libs-complete
           path: native-libs.tar.gz
-
