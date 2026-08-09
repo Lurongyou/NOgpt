@@ -96,6 +96,11 @@ jobs:
           echo "TOOLCHAIN=$PWD/android-ndk-${{ env.NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64" >> $GITHUB_ENV
       - run: git clone --branch ${{ env.FFMPEG_TAG }} --depth 1 https://github.com/FFmpeg/FFmpeg.git ffmpeg-src
       - run: |
+          # NEON/SIMD 手写汇编(如 tx_float_neon.S)里的 adrp+add 直接寻址是
+          # FFmpeg 已知问题，不受 --enable-pic 影响，链接进 .so 时会报
+          # "relocation ... recompile with -fPIC"。这里只做音频解码，
+          # 不追求极限性能，用 --disable-asm 关掉汇编优化，全走编译器生成
+          # 的PIC代码，从根上避免这类重定位错误。
           cd ffmpeg-src
           export CC=$TOOLCHAIN/bin/${{ matrix.clang_prefix }}-clang
           export CXX=$TOOLCHAIN/bin/${{ matrix.clang_prefix }}-clang++
@@ -113,6 +118,7 @@ jobs:
             --cc=$CC --cxx=$CXX --ar=$AR --strip=$STRIP --nm=$NM --ranlib=$RANLIB \
             --extra-cflags="-O3 -fPIC" \
             --enable-pic \
+            --disable-asm \
             --enable-cross-compile \
             --disable-debug --disable-stripping \
             --disable-doc --disable-htmlpages --disable-manpages --disable-podpages --disable-txtpages \
