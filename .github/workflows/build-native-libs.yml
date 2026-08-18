@@ -7,6 +7,7 @@ on:
 env:
   NDK_VERSION: r27d
   FLAC_TAG: '1.5.0'          # 最新稳定版；链接预编译.a不用再绑定旧版本号
+  FLAC131_TAG: '1.3.1'       # 兼容性优先版本，双FLAC编码器架构的第二套encoder
   FFMPEG_TAG: n9.0           # https://github.com/FFmpeg/FFmpeg/tags 目前最新
 
 jobs:
@@ -35,7 +36,7 @@ jobs:
           cmake -S flac-src -B flac-build -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE=$NDK_ROOT/build/cmake/android.toolchain.cmake \
             -DANDROID_ABI=${{ matrix.abi }} \
-            -DANDROID_PLATFORM=android-24 \
+            -DANDROID_PLATFORM=android-28 \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
             -DBUILD_CXXLIBS=OFF \
@@ -45,7 +46,7 @@ jobs:
             -DBUILD_DOCS=OFF \
             -DWITH_OGG=OFF \
             -DINSTALL_MANPAGES=OFF \
-            -DCMAKE_C_FLAGS="-DHAVE_FSEEKO=1 -DHAVE_FTELLO=1" \
+            -DCMAKE_C_FLAGS="-DHAVE_FSEEKO=1 -DHAVE_FTELLO=1 -fvisibility=hidden" \
             -DCMAKE_INSTALL_PREFIX=$PWD/flac-install
           cmake --build flac-build -j$(nproc)
           cmake --build flac-build --target install
@@ -58,6 +59,92 @@ jobs:
         with:
           name: libflac-${{ matrix.abi }}
           path: output/flac/
+
+  # ------------------------------------------------------------------
+  # 编译 libFLAC 1.3.1 —— 双FLAC编码器架构的"兼容性优先"版本。
+  #
+  # 重要：这个 job 不能照抄上面 build-libflac(1.5.0) 的 CMake 流程！
+  # 查过官方 changelog(xiph.org/flac/changelog.html) 确认：libFLAC 的
+  # CMake 构建支持是 1.3.3(2019-08-04) 才加入的("Cmake support" 条目)，
+  # 1.3.1(2014-11-25) 那个 tag 里根本没有 CMakeLists.txt。对 1.3.1 跑
+  # `cmake -S flac-src -B flac-build` 会直接失败——只能用 autotools。
+  #
+  # 用官方 release tarball(而不是 git clone)：tarball 里自带发布时预生成
+  # 好的 ./configure 脚本，不需要在 CI 里装 autoconf/automake/libtool 去跑
+  # autogen.sh——对一个11年前的老项目，用现在的 autotools 工具链重新生成
+  # configure 能不能生成对是不确定的，用官方现成的更可靠。
+  #   下载地址+MD5来自 xiph.org 官方发布页，下载后校验一遍避免损坏/被替换。
+  #
+  # 老实说明这个 job 的不确定性：1.5.0 那个 CMake job 里手动传
+  # -DHAVE_FSEEKO=1 -DHAVE_FTELLO=1，是因为 CMake 交叉编译时无法执行
+  # 目标平台的测试程序，只能手动喂答案。autotools 的 AC_CHECK_FUNCS 只做
+  # 链接检查、不需要真的跑目标程序，理论上不需要这个手动覆盖，所以这里
+  # 没有照抄。但这是基于autoconf通用机制的推断，没有拿这份11年前的
+  # configure.ac 源码逐行核对过具体用了哪些检测宏——如果这一步在CI里报错，
+  # 大概率是缺某个 ac_cv_* 覆盖变量，报错信息里通常会指出具体是哪个检测项。
+  # ------------------------------------------------------------------
+  build-libflac131:
+    name: Build libFLAC 1.3.1 (${{ matrix.abi }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # armeabi-v7a 的 --host 三元组(arm-linux-androideabi)跟它对应的
+        # NDK clang 包装脚本前缀(armv7a-linux-androideabi)不一样，
+        # arm64-v8a/x86_64 这两个是一样的——所以不能用简单的 abi 列表，
+        # 要用 include 显式列出每个 abi 对应的两个不同三元组。
+        include:
+          - abi: arm64-v8a
+            host_triple: aarch64-linux-android
+            clang_prefix: aarch64-linux-android
+          - abi: armeabi-v7a
+            host_triple: arm-linux-androideabi
+            clang_prefix: armv7a-linux-androideabi
+          - abi: x86_64
+            host_triple: x86_64-linux-android
+            clang_prefix: x86_64-linux-android
+    steps:
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y wget xz-utils
+      - run: |
+          wget -q https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip
+          unzip -q android-ndk-${{ env.NDK_VERSION }}-linux.zip
+          echo "NDK_ROOT=$PWD/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_ENV
+      - run: |
+          set -e
+          wget -q https://downloads.xiph.org/releases/flac/flac-${{ env.FLAC131_TAG }}.tar.xz
+          echo "b9922c9a0378c88d3e901b234f852698  flac-${{ env.FLAC131_TAG }}.tar.xz" | md5sum -c -
+          tar xf flac-${{ env.FLAC131_TAG }}.tar.xz
+          mv flac-${{ env.FLAC131_TAG }} flac-src
+      - run: |
+          set -e
+          TOOLCHAIN=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin
+          API=28
+          export CC=$TOOLCHAIN/${{ matrix.clang_prefix }}$API-clang
+          export CXX=$TOOLCHAIN/${{ matrix.clang_prefix }}$API-clang++
+          export AR=$TOOLCHAIN/llvm-ar
+          export RANLIB=$TOOLCHAIN/llvm-ranlib
+          export STRIP=$TOOLCHAIN/llvm-strip
+          export CFLAGS="-fvisibility=hidden -O2"
+          cd flac-src
+          ./configure \
+            --host=${{ matrix.host_triple }} \
+            --disable-shared --enable-static \
+            --disable-cpplibs \
+            --disable-ogg \
+            --disable-xmms-plugin \
+            --disable-doxygen-docs \
+            --disable-thorough-tests
+          make -j$(nproc)
+      - run: |
+          mkdir -p output/flac131/lib output/flac131/include
+          find flac-src -path "*/libFLAC/*" -name "libFLAC.a" -exec cp {} output/flac131/lib/libFLAC.a \;
+          cp -r flac-src/include/FLAC output/flac131/include/FLAC
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libflac131-${{ matrix.abi }}
+          path: output/flac131/
 
   # ------------------------------------------------------------------
   # 编译 FFmpeg，只要解码相关的三个库 + swresample(重采样格式转换，
@@ -75,15 +162,15 @@ jobs:
           - abi: arm64-v8a
             arch: aarch64
             cpu: armv8-a
-            clang_prefix: aarch64-linux-android24
+            clang_prefix: aarch64-linux-android28
           - abi: armeabi-v7a
             arch: arm
             cpu: armv7-a
-            clang_prefix: armv7a-linux-androideabi24
+            clang_prefix: armv7a-linux-androideabi28
           - abi: x86_64
             arch: x86_64
             cpu: x86-64
-            clang_prefix: x86_64-linux-android24
+            clang_prefix: x86_64-linux-android28
     steps:
       - uses: actions/checkout@v4
       - run: |
@@ -161,7 +248,7 @@ jobs:
   # ------------------------------------------------------------------
   merge:
     name: Merge artifacts
-    needs: [build-libflac, build-ffmpeg]
+    needs: [build-libflac, build-libflac131, build-ffmpeg]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -175,6 +262,11 @@ jobs:
           for abi in arm64-v8a armeabi-v7a x86_64; do
             mkdir -p native-libs/flac/$abi
             cp -r artifacts/libflac-$abi/* native-libs/flac/$abi/
+          done
+
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            mkdir -p native-libs/flac131/$abi
+            cp -r artifacts/libflac131-$abi/* native-libs/flac131/$abi/
           done
 
           mkdir -p native-libs/ffmpeg/include
